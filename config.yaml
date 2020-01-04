@@ -1,0 +1,5 @@
+apiVersion: k8s.samlockart.com/v1
+kind: ParameterStore
+metadata:
+  name: example
+path: /example/path
