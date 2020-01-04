@@ -29,8 +29,11 @@ type Config struct {
 	Path string `yaml:"path"`
 }
 
+// secretData is a map holding the secret resource data.
+// The reason it being a type is so we can add methods to it easily.
 type secretData map[string][]byte
 
+// Ditto
 type secret v1.Secret
 
 func (s *secret) Print() {
@@ -41,6 +44,10 @@ func (s *secret) String() string {
 	return string(s.Marshal())
 }
 
+// Marshal() simply marshals the secret resorce into a JSON byte stream
+// and then we call JSONToYAML to convert that. The reason being, marshalling
+// from struct to YAML does NOT honor the *v1.Secret struct's `json:",omitempty" directives.
+// If we don't honor those, we get a large YAML resource with lots of empty fields.
 func (s *secret) Marshal() []byte {
 	j, err := json.Marshal(s)
 	if err != nil {
@@ -54,6 +61,8 @@ func (s *secret) Marshal() []byte {
 	return y
 }
 
+// PutParameters() takes a slice of parameters from SSM and returns
+// a secretData map (map[string][]byte).
 func (d *secretData) PutParameters(p []*ssm.Parameter) *secretData {
 	for _, v := range p {
 		value := []byte(*v.Value)
@@ -79,11 +88,11 @@ func (c *Config) readConfig() *Config {
 }
 
 func main() {
-
 	var config Config
 	data := make(secretData)
-	recursive := false
+	recursive := false // we don't want to recurse yet... maybe in the future
 	decryption := true
+
 	sess := session.Must(session.NewSessionWithOptions(session.Options{
 		SharedConfigState: session.SharedConfigEnable,
 	}))
@@ -114,6 +123,5 @@ func main() {
 		Type: v1.SecretTypeOpaque,
 		Data: data,
 	}
-
-	s.Print()
+	s.Print() // print the secret resource
 }
