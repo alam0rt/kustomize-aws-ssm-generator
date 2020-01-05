@@ -84,9 +84,9 @@ func (d *secretData) PutParameters(p []*ssm.Parameter) *secretData {
 func (s *secret) GenAnnotations() *secret {
 	// if we want to annotate the resource, this is where we do it
 	annotations = make(map[string]string)
-	annotations[config.APIVersion+"/paramPath"] = config.Path // TODO: clean this up, add option in cofing to include
+	annotations["k8s.samlockart.com/paramPath"] = config.Path // TODO: clean this up, add option in cofing to include
 	if versioned {
-		annotations[config.APIVersion+"/paramVersion"] = strconv.Itoa(int(config.Version))
+		annotations["k8s.samlockart.com/paramVersion"] = strconv.Itoa(int(config.Version))
 	}
 	s.SetAnnotations(annotations)
 
@@ -127,7 +127,7 @@ func init() {
 		versioned = true
 	}
 	data = make(secretData)
-	recursive = false // we don't want to recurse yet... maybe in the future
+	recursive = true // we don't want to recurse yet... maybe in the future
 	decryption = true
 
 	sess = session.Must(session.NewSessionWithOptions(session.Options{
@@ -137,23 +137,29 @@ func init() {
 	svc = ssm.New(sess)
 }
 
-func getSecrets() *ssm.GetParametersByPathOutput {
-	p, err := svc.GetParametersByPath(&ssm.GetParametersByPathInput{
+func (d *secretData) getSecrets() (*secretData, error) {
+	input := &ssm.GetParametersByPathInput{
 		Path:           &config.Path,
 		Recursive:      &recursive,
 		WithDecryption: &decryption,
-	})
-	if err != nil {
-		fmt.Print(err)
-		os.Exit(1)
 	}
+	for {
+		resp, err := svc.GetParametersByPath(input)
+		if err != nil {
+			return nil, err
+		}
 
-	return p
+		d.PutParameters(resp.Parameters)
+		if resp.NextToken == nil {
+			break
+		}
+		input.SetNextToken(*resp.NextToken)
+	}
+	return d, nil
 }
 
 func main() {
-	parameters = getSecrets()
-	data.PutParameters(parameters.Parameters)
+	data.getSecrets()
 
 	s := &secret{
 		TypeMeta: metav1.TypeMeta{
