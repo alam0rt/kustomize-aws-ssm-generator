@@ -11,6 +11,8 @@ import (
 	"io/ioutil"
 	"strings"
 
+	"strconv"
+
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/ssm"
 	v1 "k8s.io/api/core/v1"
@@ -21,12 +23,14 @@ import (
 // data. The config is passed to the application as a path
 // and is then unmarshalled into this struct.
 type Config struct {
-	Version  string `yaml:"apiVersion"`
-	Kind     string `yaml:"kind"`
-	Metadata struct {
+	APIVersion string `yaml:"apiVersion"`
+	Kind       string `yaml:"kind"`
+	Metadata   struct {
 		Name string `yaml:"name"`
 	}
-	Path string `yaml:"path"`
+	Path     string `yaml:"path"`
+	Version  int64  `yaml:"version,omitempty"`
+	Annotate bool   `yaml:"annotate,omitempty"`
 }
 
 // secretData is a map holding the secret resource data.
@@ -65,12 +69,28 @@ func (s *secret) Marshal() []byte {
 // a secretData map (map[string][]byte).
 func (d *secretData) PutParameters(p []*ssm.Parameter) *secretData {
 	for _, v := range p {
-		value := []byte(*v.Value)
-		s := strings.Split(*v.Name, "/")
-		name := s[len(s)-1]
-		(*d)[name] = value
+		// if we have set the version field, we will only use that version of the
+		// parameter.
+		if *v.Version == config.Version || versioned == false {
+			value := []byte(*v.Value)        // get parameter value as []byte
+			s := strings.Split(*v.Name, "/") // split path up and choose last element for name
+			name := s[len(s)-1]
+			(*d)[name] = value
+		}
 	}
 	return d
+}
+
+func (s *secret) GenAnnotations() *secret {
+	// if we want to annotate the resource, this is where we do it
+	annotations = make(map[string]string)
+	annotations[config.APIVersion+"/paramPath"] = config.Path // TODO: clean this up, add option in cofing to include
+	if versioned {
+		annotations[config.APIVersion+"/paramVersion"] = strconv.Itoa(int(config.Version))
+	}
+	s.SetAnnotations(annotations)
+
+	return s
 }
 
 func (c *Config) readConfig() *Config {
@@ -87,20 +107,37 @@ func (c *Config) readConfig() *Config {
 	return c
 }
 
-func main() {
-	var config Config
-	data := make(secretData)
-	recursive := false // we don't want to recurse yet... maybe in the future
-	decryption := true
+var (
+	versioned             bool // do we care about the parameter version?
+	config                Config
+	data                  secretData
+	recursive, decryption bool
+	svc                   *ssm.SSM
+	sess                  *session.Session
+	parameters            *ssm.GetParametersByPathOutput
+	annotations           map[string]string
+)
 
-	sess := session.Must(session.NewSessionWithOptions(session.Options{
+func init() {
+	config.readConfig()
+
+	if config.Version == 0 {
+		versioned = false
+	} else {
+		versioned = true
+	}
+	data = make(secretData)
+	recursive = false // we don't want to recurse yet... maybe in the future
+	decryption = true
+
+	sess = session.Must(session.NewSessionWithOptions(session.Options{
 		SharedConfigState: session.SharedConfigEnable,
 	}))
 
-	config.readConfig()
+	svc = ssm.New(sess)
+}
 
-	svc := ssm.New(sess)
-
+func getSecrets() *ssm.GetParametersByPathOutput {
 	p, err := svc.GetParametersByPath(&ssm.GetParametersByPathInput{
 		Path:           &config.Path,
 		Recursive:      &recursive,
@@ -108,9 +145,15 @@ func main() {
 	})
 	if err != nil {
 		fmt.Print(err)
+		os.Exit(1)
 	}
 
-	data.PutParameters(p.Parameters)
+	return p
+}
+
+func main() {
+	parameters = getSecrets()
+	data.PutParameters(parameters.Parameters)
 
 	s := &secret{
 		TypeMeta: metav1.TypeMeta{
@@ -122,6 +165,10 @@ func main() {
 		},
 		Type: v1.SecretTypeOpaque,
 		Data: data,
+	}
+
+	if config.Annotate {
+		s.GenAnnotations() // populate with annotations if set
 	}
 	s.Print() // print the secret resource
 }

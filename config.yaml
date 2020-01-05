@@ -3,3 +3,5 @@ kind: ParameterStore
 metadata:
   name: example
 path: /example/path
+version: 1
+annotate: true
