@@ -127,7 +127,7 @@ func init() {
 		versioned = true
 	}
 	data = make(secretData)
-	recursive = true // we don't want to recurse yet... maybe in the future
+	recursive = false // we don't want to recurse yet... maybe in the future
 	decryption = true
 
 	sess = session.Must(session.NewSessionWithOptions(session.Options{
