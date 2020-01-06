@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
@@ -58,33 +59,37 @@ type Config struct {
 }
 
 func (s *secret) Print() {
-	fmt.Printf("%s\n", string(s.Marshal()))
+	fmt.Printf("%s\n", s.String())
 }
 
 func (s *secret) String() string {
-	return string(s.Marshal())
+	b, err := s.Marshal()
+	if err != nil {
+		Panic(err.Error())
+	}
+	return string(b)
 }
 
 // Marshal() simply marshals the secret resorce into a JSON byte stream
 // and then we call JSONToYAML to convert that. The reason being, marshalling
 // from struct to YAML does NOT honor the *v1.Secret struct's `json:",omitempty" directives.
 // If we don't honor those, we get a large YAML resource with lots of empty fields.
-func (s *secret) Marshal() []byte {
+func (s *secret) Marshal() ([]byte, error) {
 	j, err := json.Marshal(s)
 	if err != nil {
-		fmt.Print(err)
+		return nil, err
 	}
 
 	y, err := yaml.JSONToYAML(j)
 	if err != nil {
-		fmt.Print(err)
+		return nil, err
 	}
-	return y
+	return y, nil
 }
 
-// PutParameters() takes a slice of parameters from SSM and returns
+// PutSecrets takes a slice of parameters from SSM and returns
 // a secretData map (map[string][]byte).
-func (d *secretData) PutParameters(p []*ssm.Parameter) *secretData {
+func (d *secretData) PutSecrets(p []*ssm.Parameter) *secretData {
 	for _, v := range p {
 		// if we have set the version field, we will only use that version of the
 		// parameter.
@@ -118,30 +123,30 @@ func Panic(s string) {
 	os.Exit(1)
 }
 
-func (c *Config) readConfig() *Config {
+func (c *Config) readConfig() (*Config, error) {
+
 	if len(os.Args) == 1 {
-		Panic("no config file - the first and only argument must be a path to a valid config")
+		return nil, errors.New("you must provide a path to a valid config as the first argument to this application")
 	}
 	f, err := ioutil.ReadFile(os.Args[1])
 	if err != nil {
-		Panic("enable to read config file")
+		return nil, err
 	}
 
 	err = yaml.Unmarshal(f, c)
 	if err != nil {
-		Panic("config file is invalid")
+		return nil, err
 	}
 
-	return c
+	return c, err
 }
 
 func init() {
 	config.readConfig()
 
+	versioned = true
 	if config.Version == 0 {
 		versioned = false
-	} else {
-		versioned = true
 	}
 
 	data = make(secretData)
@@ -158,7 +163,7 @@ func init() {
 	})
 }
 
-func (d *secretData) getSecrets() (*secretData, error) {
+func (d *secretData) GetSecrets() (*secretData, error) {
 	input := &ssm.GetParametersByPathInput{
 		Path:           &config.Path,
 		Recursive:      &recursive,
@@ -170,7 +175,7 @@ func (d *secretData) getSecrets() (*secretData, error) {
 			return nil, err
 		}
 
-		d.PutParameters(resp.Parameters)
+		d.PutSecrets(resp.Parameters)
 		if resp.NextToken == nil {
 			break
 		}
@@ -184,7 +189,10 @@ func (d *secretData) getSecrets() (*secretData, error) {
 
 func main() {
 	// populate map with secrets from SSM
-	data.getSecrets()
+	_, err := data.GetSecrets()
+	if err != nil {
+		Panic(err.Error())
+	}
 
 	// create a secret resource
 	s := &secret{
