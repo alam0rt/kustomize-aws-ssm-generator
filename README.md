@@ -11,6 +11,7 @@ metadata:
 path: /example/path
 version: 1
 annotate: true
+region: ap-southeast-2
 ```
 
 and will generate a Secret resource named `example` from the AWS Parameter Store path  `/example/path`
@@ -22,6 +23,8 @@ and will generate a Secret resource named `example` from the AWS Parameter Store
 *version* is the parameter version you want to retrieve from SSM (optional, if not set, latest parameter will be used.)
 
 *annotate* is a bool, if set to true the `v1/Secret` resource will be annotated with some information about where the parameters were pulled from and what version (if any) are used
+
+*region* is used to set the AWS region for the plugin
 
 
 #### Installation
