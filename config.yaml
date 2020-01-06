@@ -3,5 +3,6 @@ kind: ParameterStore
 metadata:
   name: example
 path: /example/path
+region: ap-southeast-2
 version: 1
 annotate: true

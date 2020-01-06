@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/aws/aws-sdk-go/aws"
+
 	"encoding/json"
 
 	"github.com/ghodss/yaml"
@@ -19,6 +21,27 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// APIVERSION is the same as the `apiVersion` + /v1
+const APIVERSION = "k8s.samlockart.com"
+
+var (
+	versioned             bool // do we care about the parameter version?
+	config                Config
+	data                  secretData
+	recursive, decryption bool
+	svc                   *ssm.SSM
+	sess                  *session.Session
+	parameters            *ssm.GetParametersByPathOutput
+	annotations           map[string]string
+)
+
+// secretData is a map holding the secret resource data.
+// The reason it being a type is so we can add methods to it easily.
+type secretData map[string][]byte
+
+// Ditto
+type secret v1.Secret
+
 // Config is a structure which holds the config map
 // data. The config is passed to the application as a path
 // and is then unmarshalled into this struct.
@@ -31,14 +54,8 @@ type Config struct {
 	Path     string `yaml:"path"`
 	Version  int64  `yaml:"version,omitempty"`
 	Annotate bool   `yaml:"annotate,omitempty"`
+	Region   string `yaml:"region"`
 }
-
-// secretData is a map holding the secret resource data.
-// The reason it being a type is so we can add methods to it easily.
-type secretData map[string][]byte
-
-// Ditto
-type secret v1.Secret
 
 func (s *secret) Print() {
 	fmt.Printf("%s\n", string(s.Marshal()))
@@ -84,39 +101,39 @@ func (d *secretData) PutParameters(p []*ssm.Parameter) *secretData {
 func (s *secret) GenAnnotations() *secret {
 	// if we want to annotate the resource, this is where we do it
 	annotations = make(map[string]string)
-	annotations["k8s.samlockart.com/paramPath"] = config.Path // TODO: clean this up, add option in cofing to include
+	annotations[APIVERSION+"/paramPath"] = config.Path // TODO: clean this up, add option in cofing to include
+	annotations[APIVERSION+"/paramRegion"] = config.Region
 	if versioned {
-		annotations["k8s.samlockart.com/paramVersion"] = strconv.Itoa(int(config.Version))
+		annotations[APIVERSION+"/paramVersion"] = strconv.Itoa(int(config.Version))
 	}
 	s.SetAnnotations(annotations)
 
 	return s
 }
 
+// Panic will print provided string and exit
+func Panic(s string) {
+	err := fmt.Errorf(s)
+	fmt.Println(err)
+	os.Exit(1)
+}
+
 func (c *Config) readConfig() *Config {
+	if len(os.Args) == 1 {
+		Panic("no config file - the first and only argument must be a path to a valid config")
+	}
 	f, err := ioutil.ReadFile(os.Args[1])
 	if err != nil {
-		fmt.Print(err)
+		Panic("enable to read config file")
 	}
 
 	err = yaml.Unmarshal(f, c)
 	if err != nil {
-		fmt.Print(err)
+		Panic("config file is invalid")
 	}
 
 	return c
 }
-
-var (
-	versioned             bool // do we care about the parameter version?
-	config                Config
-	data                  secretData
-	recursive, decryption bool
-	svc                   *ssm.SSM
-	sess                  *session.Session
-	parameters            *ssm.GetParametersByPathOutput
-	annotations           map[string]string
-)
 
 func init() {
 	config.readConfig()
@@ -126,6 +143,7 @@ func init() {
 	} else {
 		versioned = true
 	}
+
 	data = make(secretData)
 	recursive = false // we don't want to recurse yet... maybe in the future
 	decryption = true
@@ -134,7 +152,10 @@ func init() {
 		SharedConfigState: session.SharedConfigEnable,
 	}))
 
-	svc = ssm.New(sess)
+	svc = ssm.New(sess, &aws.Config{
+		MaxRetries: aws.Int(3),
+		Region:     &config.Region,
+	})
 }
 
 func (d *secretData) getSecrets() (*secretData, error) {
@@ -155,12 +176,17 @@ func (d *secretData) getSecrets() (*secretData, error) {
 		}
 		input.SetNextToken(*resp.NextToken)
 	}
+	if len(*d) == 0 {
+		Panic("there was a problem creating a list of secrets: no secrets found")
+	}
 	return d, nil
 }
 
 func main() {
+	// populate map with secrets from SSM
 	data.getSecrets()
 
+	// create a secret resource
 	s := &secret{
 		TypeMeta: metav1.TypeMeta{
 			Kind:       "Secret",
