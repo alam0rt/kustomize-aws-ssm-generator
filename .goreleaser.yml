@@ -20,7 +20,7 @@ snapshot:
   name_template: "{{ .Tag }}-next"
 release:
   github:
-    user: alam0rt
+    owner: alam0rt
     name: kustomize-aws-ssm-generator
 changelog:
   sort: asc
