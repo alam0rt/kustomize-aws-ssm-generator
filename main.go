@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/session"
 
 	"encoding/json"
 
@@ -16,8 +17,8 @@ import (
 
 	"strconv"
 
-	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/ssm"
+	"github.com/aws/aws-sdk-go/service/ssm/ssmiface"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -28,7 +29,7 @@ const APIVERSION = "k8s.samlockart.com"
 var (
 	versioned             bool // do we care about the parameter version?
 	config                Config
-	data                  secretData
+	data                  SecretData
 	recursive, decryption bool
 	svc                   *ssm.SSM
 	sess                  *session.Session
@@ -36,9 +37,15 @@ var (
 	annotations           map[string]string
 )
 
-// secretData is a map holding the secret resource data.
+type Session struct {
+	secrets SecretData
+	config  Config
+	ssm     *SSMStore
+}
+
+// SecretData is a map holding the secret resource data.
 // The reason it being a type is so we can add methods to it easily.
-type secretData map[string][]byte
+type SecretData map[string][]byte
 
 // Ditto
 type secret v1.Secret
@@ -52,10 +59,13 @@ type Config struct {
 	Metadata   struct {
 		Name string `yaml:"name"`
 	}
-	Path     string `yaml:"path"`
-	Version  int64  `yaml:"version,omitempty"`
-	Annotate bool   `yaml:"annotate,omitempty"`
-	Region   string `yaml:"region"`
+	Path           string `yaml:"path"`
+	Version        int64  `yaml:"version,omitempty"`
+	Annotate       bool   `yaml:"annotate,omitempty"`
+	Region         string `yaml:"region"`
+	WithDecryption bool
+	Versioned      bool
+	Recursive      bool
 }
 
 func (s *secret) Print() {
@@ -87,9 +97,25 @@ func (s *secret) Marshal() ([]byte, error) {
 	return y, nil
 }
 
+// PutSecrets2 takes a slice of parameters from SSM and returns
+// a SecretData map (map[string][]byte).
+func (s *Session) PutSecrets2(p []*ssm.Parameter) error {
+	for _, v := range p {
+		// if we have set the version field, we will only use that version of the
+		// parameter.
+		if v.Version == &s.config.Version || s.config.Versioned {
+			value := []byte(*v.Value)          // get parameter value as []byte
+			sec := strings.Split(*v.Name, "/") // split path up and choose last element for name
+			name := sec[len(sec)-1]
+			s.secrets[name] = value
+		}
+	}
+	return nil
+}
+
 // PutSecrets takes a slice of parameters from SSM and returns
-// a secretData map (map[string][]byte).
-func (d *secretData) PutSecrets(p []*ssm.Parameter) *secretData {
+// a SecretData map (map[string][]byte).
+func (d *SecretData) PutSecrets(p []*ssm.Parameter) *SecretData {
 	for _, v := range p {
 		// if we have set the version field, we will only use that version of the
 		// parameter.
@@ -141,33 +167,68 @@ func (c *Config) readConfig() (*Config, error) {
 	return c, err
 }
 
-func init() {
-	config.readConfig()
+// SSMStore implements an SSM service object
+type SSMStore struct {
+	svc ssmiface.SSMAPI
+}
 
-	versioned = true
-	if config.Version == 0 {
-		versioned = false
-	}
+// CreateSSMStore creates an SSM store
+func (s *Session) InitSSMStore() *Session {
+	sess = session.Must(session.NewSessionWithOptions(session.Options{
+		SharedConfigState: session.SharedConfigEnable,
+	}))
 
-	data = make(secretData)
-	recursive = false // we don't want to recurse yet... maybe in the future
-	decryption = true
+	s.ssm.svc = ssm.New(sess, &aws.Config{
+		MaxRetries: aws.Int(3),
+		Region:     &s.config.Region,
+	})
+	return s
+}
 
+// CreateSSMStore creates an SSM store
+func CreateSSMStore(c *Config) *SSMStore {
 	sess = session.Must(session.NewSessionWithOptions(session.Options{
 		SharedConfigState: session.SharedConfigEnable,
 	}))
 
 	svc = ssm.New(sess, &aws.Config{
 		MaxRetries: aws.Int(3),
-		Region:     &config.Region,
+		Region:     &c.Region,
 	})
+
+	return &SSMStore{
+		svc: svc,
+	}
 }
 
-func (d *secretData) GetSecrets() (*secretData, error) {
+func (s *Session) GetSecrets2() ([]*ssm.Parameter, error) {
+	fmt.Print("wow")
+	i := &ssm.GetParametersByPathInput{
+		Path:           &s.config.Path,
+		Recursive:      &s.config.Recursive,
+		WithDecryption: &s.config.WithDecryption,
+	}
+	var p []*ssm.Parameter
+	for {
+		resp, err := s.ssm.svc.GetParametersByPath(i)
+		if err != nil {
+			return nil, err
+		}
+
+		p = append(resp.Parameters)
+		if resp.NextToken == nil {
+			break
+		}
+		i.SetNextToken(*resp.NextToken)
+	}
+	return p, nil
+}
+
+func (d *SecretData) GetSecrets() (*SecretData, error) {
 	input := &ssm.GetParametersByPathInput{
 		Path:           &config.Path,
-		Recursive:      &recursive,
-		WithDecryption: &decryption,
+		Recursive:      &config.Recursive,
+		WithDecryption: &config.WithDecryption,
 	}
 	for {
 		resp, err := svc.GetParametersByPath(input)
@@ -187,15 +248,42 @@ func (d *secretData) GetSecrets() (*secretData, error) {
 	return d, nil
 }
 
+var s Session
+
+func init() {
+
+}
+
 func main() {
-	// populate map with secrets from SSM
-	_, err := data.GetSecrets()
+	s := Session{
+		secrets: make(SecretData),
+	}
+	_, err := s.config.readConfig()
 	if err != nil {
 		Panic(err.Error())
 	}
+	if s.config.Version == 0 {
+		s.config.Versioned = false
+	}
+	// old
+	config.readConfig()
+	config.Versioned = true
+	if config.Version == 0 {
+		config.Versioned = false
+	}
+
+	data = make(SecretData)
+	config.Recursive = false // we don't want to recurse yet... maybe in the future
+	config.WithDecryption = true
+
+	wow, err := s.GetSecrets2()
+	if err != nil {
+		Panic(err.Error())
+	}
+	fmt.Print(wow)
 
 	// create a secret resource
-	s := &secret{
+	sec := &secret{
 		TypeMeta: metav1.TypeMeta{
 			Kind:       "Secret",
 			APIVersion: v1.SchemeGroupVersion.Version,
@@ -208,7 +296,7 @@ func main() {
 	}
 
 	if config.Annotate {
-		s.GenAnnotations() // populate with annotations if set
+		sec.GenAnnotations() // populate with annotations if set
 	}
-	s.Print() // print the secret resource
+	sec.Print() // print the secret resource
 }
