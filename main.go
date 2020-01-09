@@ -26,89 +26,12 @@ import (
 // APIVERSION is the same as the `apiVersion` + /v1
 const APIVERSION = "k8s.samlockart.com"
 
-var (
-	sess *session.Session
-	_    Store = &SSMStore{}
-)
+// Ensure that SSMStore satisfies the Store interface
+var _ Store = &SSMStore{}
 
-type Store interface {
-	List(path string) ([]Secret, error)
-}
-
-type Secret struct {
-	Value *string
-	Meta  SecretMetadata
-}
-
-type SecretMetadata struct {
-	Version int64
-	Key     string
-}
-
-type Session struct {
-	secrets  SecretData
-	config   Config
-	manifest *manifest
-	svc      ssmiface.SSMAPI
-}
-
-type Manifest v1.Secret
-
-func (s *Secret) Eat(p *ssm.Parameter) *Secret {
-	s.Value = p.Value
-	s.Meta.Key = *p.Name
-	s.Meta.Version = *p.Version
-	return s
-}
-
-// List takes a path and returns a slice of Secrets
-func (s *SSMStore) List(path string) ([]Secret, error) {
-	secrets := map[string]Secret{}
-	i := &ssm.GetParametersByPathInput{
-		Path:           aws.String(path),
-		Recursive:      aws.Bool(false),
-		WithDecryption: aws.Bool(true),
-	}
-	parameterOutput, err := s.svc.GetParametersByPath(i)
-	for {
-		if err != nil {
-			return nil, err
-		}
-
-		for _, p := range parameterOutput.Parameters {
-			s := &Secret{}
-			s.Eat(p)
-			secrets[s.Meta.Key] = *s
-		}
-		if parameterOutput.NextToken == nil {
-			break
-		}
-		i.SetNextToken(*parameterOutput.NextToken)
-	}
-
-	return values(secrets), nil
-}
-
-func values(m map[string]Secret) []Secret {
-	values := []Secret{}
-	for _, v := range m {
-		values = append(values, v)
-	}
-	return values
-}
-
-func NewSSMStore(region string) (*SSMStore, error) {
-	session := session.Must(session.NewSessionWithOptions(session.Options{
-		SharedConfigState: session.SharedConfigEnable,
-	}))
-
-	svc := ssm.New(session, &aws.Config{
-		Region:     &region,
-		MaxRetries: aws.Int(3),
-	})
-	return &SSMStore{
-		svc: svc,
-	}, nil
+// SSMStore implements an SSM service object
+type SSMStore struct {
+	svc ssmiface.SSMAPI
 }
 
 // SecretData is a map holding the secret resource data.
@@ -131,9 +54,160 @@ type Config struct {
 	Version        int64  `yaml:"version,omitempty"`
 	Annotate       bool   `yaml:"annotate,omitempty"`
 	Region         string `yaml:"region"`
+	Type           string `yaml:"type,omitempty"`
 	WithDecryption bool
 	Versioned      bool
 	Recursive      bool
+}
+
+type Store interface {
+	Get(path string) ([]Secret, error)
+}
+
+type Secret struct {
+	Value *string
+	Meta  SecretMetadata
+}
+
+type SecretMetadata struct {
+	Version int64
+	Key     string
+}
+
+type Session struct {
+	secrets  SecretData
+	config   Config
+	store    Store
+	manifest *manifest
+}
+
+func matchType(s v1.SecretType) bool {
+	var secret v1.SecretType = v1.SecretType(s)
+	secretTypes := []v1.SecretType{
+		v1.SecretTypeBasicAuth,
+		v1.SecretTypeBootstrapToken,
+		v1.SecretTypeDockerConfigJson,
+		v1.SecretTypeDockercfg,
+		v1.SecretTypeOpaque,
+		v1.SecretTypeSSHAuth,
+		v1.SecretTypeServiceAccountToken,
+		v1.SecretTypeTLS,
+	}
+
+	for _, t := range secretTypes {
+		if t == secret {
+			return true
+		}
+	}
+	return false
+
+}
+
+func (s *Session) RenderManifest(secrets []Secret) error {
+	data := make(map[string][]byte)
+	for _, sec := range secrets {
+		if sec.Meta.Version == s.config.Version || s.config.Versioned == false {
+			data[sec.Name()] = []byte(*sec.Value)
+		}
+	}
+	if len(data) == 0 {
+		err := errors.New("no secrets retrieved - cannot create Secret")
+		return err
+
+	}
+
+	// if the provided type matches a known type, use it
+	// otherwise just let K8s decide
+	t := v1.SecretType(s.config.Type)
+	if !matchType(t) {
+		t = ""
+	}
+
+	s.manifest = &manifest{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "Secret",
+			APIVersion: v1.SchemeGroupVersion.Version,
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: s.config.Metadata.Name,
+		},
+		Type: t,
+		Data: data,
+	}
+
+	if s.config.Annotate {
+		s.GenAnnotations()
+	}
+	fmt.Print(s.manifest)
+	return nil
+
+}
+
+// Name returns the name of a given Secret type
+func (s *Secret) Name() string {
+	n := strings.Split(s.Meta.Key, "/") // split path up and choose last element for name
+	return n[len(n)-1]
+
+}
+
+// Put takes an SSM parameter and returns a Secret
+func (s *Secret) Put(p *ssm.Parameter) *Secret {
+	s.Value = p.Value
+	s.Meta.Key = *p.Name
+	s.Meta.Version = *p.Version
+	return s
+}
+
+// Get takes a path and returns a slice of Secrets
+func (s *SSMStore) Get(path string) ([]Secret, error) {
+	secrets := map[string]Secret{}
+	i := &ssm.GetParametersByPathInput{
+		Path:           aws.String(path),
+		Recursive:      aws.Bool(false),
+		WithDecryption: aws.Bool(true),
+	}
+
+	parameterOutput, err := s.svc.GetParametersByPath(i)
+	for {
+		if err != nil {
+			return nil, err
+		}
+
+		for _, p := range parameterOutput.Parameters {
+			s := &Secret{}
+			s.Put(p)
+			secrets[s.Meta.Key] = *s
+		}
+		if parameterOutput.NextToken == nil {
+			break
+		}
+		i.SetNextToken(*parameterOutput.NextToken)
+	}
+
+	return values(secrets), nil
+}
+
+func values(m map[string]Secret) []Secret {
+	values := []Secret{}
+	for _, v := range m {
+		values = append(values, v)
+	}
+	return values
+}
+
+// NewSSMStore takes a region and returns an SSM session
+func NewSSMStore(region string) (*SSMStore, error) {
+	session := session.Must(session.NewSessionWithOptions(session.Options{
+		SharedConfigState: session.SharedConfigEnable,
+	}))
+
+	svc := ssm.New(session, &aws.Config{
+		Region:     &region,
+		MaxRetries: aws.Int(3),
+	})
+	return &SSMStore{
+		svc: svc,
+	}, nil
 }
 
 func (s *manifest) Print() {
@@ -165,22 +239,7 @@ func (s *manifest) Marshal() ([]byte, error) {
 	return y, nil
 }
 
-// PutSecrets2 takes a slice of parameters from SSM and returns
-// a SecretData map (map[string][]byte).
-func (s *Session) PutSecrets(p []*ssm.Parameter) error {
-	for _, v := range p {
-		// if we have set the version field, we will only use that version of the
-		// parameter.
-		if v.Version == &s.config.Version || s.config.Versioned {
-			value := []byte(*v.Value)          // get parameter value as []byte
-			sec := strings.Split(*v.Name, "/") // split path up and choose last element for name
-			name := sec[len(sec)-1]
-			s.secrets[name] = value
-		}
-	}
-	return nil
-}
-
+// GenAnnotations generates and annotates the Secret resource
 func (s *Session) GenAnnotations() *Session {
 	// if we want to annotate the resource, this is where we do it
 	s.manifest.Annotations = make(map[string]string)
@@ -189,7 +248,6 @@ func (s *Session) GenAnnotations() *Session {
 	if s.config.Versioned {
 		s.manifest.Annotations[APIVERSION+"/paramVersion"] = strconv.Itoa(int(s.config.Version))
 	}
-
 	return s
 }
 
@@ -215,88 +273,32 @@ func (c *Config) readConfig() (*Config, error) {
 		return nil, err
 	}
 
+	if c.Version > 0 {
+		c.Versioned = true
+	}
+
 	return c, err
 }
 
-// SSMStore implements an SSM service object
-type SSMStore struct {
-	svc ssmiface.SSMAPI
-}
-
-func (s *Session) GetSecretsByPath() error {
-	i := &ssm.GetParametersByPathInput{
-		Path:           &s.config.Path,
-		Recursive:      &s.config.Recursive,
-		WithDecryption: &s.config.WithDecryption,
-	}
-	var p []*ssm.Parameter
-	for {
-		resp, err := s.svc.GetParametersByPath(i)
-		if err != nil {
-			return err
-		}
-
-		p = append(resp.Parameters)
-		if resp.NextToken == nil {
-			break
-		}
-		i.SetNextToken(*resp.NextToken)
-	}
-	s.PutSecrets(p)
-	return nil
-}
-
 func main() {
-	var omar Store
-	omar, err := NewSSMStore("ap-southeast-2")
-	wow, _ := omar.List("/ops/esp/7e/dev/reconciliation")
-	fmt.Print(wow)
-	for _, s := range wow {
-		fmt.Print(*s.Value)
+	var s Session
+	var secrets []Secret
+	_, err := s.config.readConfig()
+	if err != nil {
+		Panic(err.Error())
+	}
+	s.store, err = NewSSMStore(s.config.Region)
+	if err != nil {
+		Panic(err.Error())
+	}
+	secrets, err = s.store.Get(s.config.Path)
+	if err != nil {
+		Panic(err.Error())
+	}
+	err = s.RenderManifest(secrets)
+	if err != nil {
+		Panic(err.Error())
 	}
 
 	os.Exit(0)
-	sess = session.Must(session.NewSessionWithOptions(session.Options{
-		SharedConfigState: session.SharedConfigEnable,
-	}))
-
-	s := Session{
-		secrets: make(SecretData),
-	}
-	_, err = s.config.readConfig()
-	if err != nil {
-		Panic(err.Error())
-	}
-	s.config.Versioned = true
-	if s.config.Version == 0 {
-		s.config.Versioned = false
-	}
-
-	s.svc = ssm.New(sess, &aws.Config{
-		MaxRetries: aws.Int(3),
-		Region:     &s.config.Region,
-	})
-
-	err = s.GetSecretsByPath()
-	if err != nil {
-		Panic(err.Error())
-	}
-
-	// create a secret resource
-	s.manifest = &manifest{
-		TypeMeta: metav1.TypeMeta{
-			Kind:       "Secret",
-			APIVersion: v1.SchemeGroupVersion.Version,
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name: s.config.Metadata.Name,
-		},
-		Type: v1.SecretTypeOpaque,
-		Data: s.secrets,
-	}
-
-	if s.config.Annotate {
-		s.GenAnnotations()
-	}
-	s.manifest.Print() // print the secret resource
 }
