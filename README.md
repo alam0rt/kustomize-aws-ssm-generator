@@ -12,6 +12,7 @@ path: /example/path
 version: 1
 annotate: true
 region: ap-southeast-2
+type: Opaque
 ```
 
 and will generate a Secret resource named `example` from the AWS Parameter Store path  `/example/path`
@@ -25,6 +26,8 @@ and will generate a Secret resource named `example` from the AWS Parameter Store
 *annotate* is a bool, if set to true the `v1/Secret` resource will be annotated with some information about where the parameters were pulled from and what version (if any) are used
 
 *region* is used to set the AWS region for the plugin
+
+*type* is used to set the Kubernetes v1.Secret type, e.g. kubernetes.io/tls. If not set it will default to Opaque.
 
 
 #### Installation
