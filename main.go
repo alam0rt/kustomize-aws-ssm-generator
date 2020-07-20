@@ -49,7 +49,7 @@ type secret v1.Secret
 type Config struct {
 	APIVersion string            `yaml:"apiVersion"`
 	Kind       string            `yaml:"kind"`
-	Metadata   metav1.ObjectMeta `yaml:metadata`
+	Metadata   metav1.ObjectMeta `yaml:"metadata"`
 	Path       string            `yaml:"path"`
 	Version    int64             `yaml:"version,omitempty"`
 	Annotate   bool              `yaml:"annotate,omitempty"`
