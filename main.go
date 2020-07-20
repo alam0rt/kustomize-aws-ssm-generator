@@ -198,12 +198,9 @@ func main() {
 			Kind:       "Secret",
 			APIVersion: v1.SchemeGroupVersion.Version,
 		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      config.Metadata.Name,
-			Namespace: config.Metadata.Namespace,
-		},
-		Type: v1.SecretTypeOpaque,
-		Data: data,
+		ObjectMeta: config.Metadata,
+		Type:       v1.SecretTypeOpaque,
+		Data:       data,
 	}
 
 	if config.Annotate {
