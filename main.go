@@ -47,15 +47,13 @@ type secret v1.Secret
 // data. The config is passed to the application as a path
 // and is then unmarshalled into this struct.
 type Config struct {
-	APIVersion string `yaml:"apiVersion"`
-	Kind       string `yaml:"kind"`
-	Metadata   struct {
-		Name string `yaml:"name"`
-	}
-	Path     string `yaml:"path"`
-	Version  int64  `yaml:"version,omitempty"`
-	Annotate bool   `yaml:"annotate,omitempty"`
-	Region   string `yaml:"region"`
+	APIVersion string            `yaml:"apiVersion"`
+	Kind       string            `yaml:"kind"`
+	Metadata   metav1.ObjectMeta `yaml:metadata`
+	Path       string            `yaml:"path"`
+	Version    int64             `yaml:"version,omitempty"`
+	Annotate   bool              `yaml:"annotate,omitempty"`
+	Region     string            `yaml:"region"`
 }
 
 func (s *secret) Print() {
@@ -201,7 +199,8 @@ func main() {
 			APIVersion: v1.SchemeGroupVersion.Version,
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Name: config.Metadata.Name,
+			Name:      config.Metadata.Name,
+			Namespace: config.Metadata.Namespace,
 		},
 		Type: v1.SecretTypeOpaque,
 		Data: data,

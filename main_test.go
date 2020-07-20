@@ -9,7 +9,8 @@ import (
 )
 
 type metadata struct {
-	Name string `yaml:"name"`
+	Name      string `yaml:"name"`
+	Namespace string `yaml: "namespace"`
 }
 
 var testConfig Config
@@ -18,8 +19,9 @@ func init() {
 	testConfig = Config{
 		APIVersion: "k8s.samlockart.com/v1",
 		Kind:       "ParameterStore",
-		Metadata: metadata{
-			Name: "test",
+		Metadata: metav1.ObjectMeta{
+			Name:      "test",
+			Namespace: "secret",
 		},
 		Path:     "/",
 		Version:  1,
@@ -64,7 +66,7 @@ func TestSecretData(t *testing.T) {
 		Data: d,
 	}
 
-	m := s.Marshal()
+	m, _ := s.Marshal()
 	x := &secret{}
 
 	yaml.Unmarshal(m, x)
